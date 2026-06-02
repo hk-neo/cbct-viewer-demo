@@ -145,13 +145,14 @@
   - WW: `[50, 4000]`, step 1
 - 트랙: 4px (기존 1줄 input보다 살짝 두껍게), 채움 `--accent-grad`
 - 드래그: `input` 이벤트마다 `VolumeController.setWindowLevel(level, width)` 호출
-- 동작 모델 — **WL/WW은 현재 활성 preset 위에 윈도잉으로 적용**:
-  - 사용자가 프리셋(BONE/SOFT/LUNG)을 고르면, 그 preset의 `domain`/`controlPoints`가 `TransferFunction1D`에 로드됨
-  - 사용자가 WL/WW 슬라이더를 움직이면, **현재 transfer function의 `domain`을 `[level - width/2, level + width/2]`로 재매핑**하고 control points는 새 domain 안에서 비례 재배치
-  - 즉, 프리셋이 골라주는 "색/투명도 곡선 형태"는 유지하면서 "어떤 HU 구간을 볼지"만 WL/WW가 조절 (방사선 의사 워크플로와 일치)
+- 동작 모델 — **WL/WW은 셰이더 uniform으로 적용 (A 방향)**:
+  - 사용자가 프리셋(BONE/SOFT/LUNG)을 고르면, 그 preset의 `TransferFunction`이 `TransferFunction1D`에 로드되고, 셰이더 uniform `uWindowLevel`/`uWindowWidth`가 preset의 기본값으로 리셋됨
+  - 사용자가 WL/WW 슬라이더를 움직이면, `uWindowLevel`/`uWindowWidth` 셰이더 uniform이 갱신됨 (LUT은 그대로)
+  - 셰이더의 정규화 공식: `clamp((density - (uWindowLevel - uWindowWidth * 0.5)) / uWindowWidth, 0.0, 1.0)` — 표준 radiology 윈도잉
+  - 즉, 프리셋이 골라주는 "색/투명도 곡선 형태"는 LUT에, "어떤 HU 구간을 볼지"는 셰이더 uniform이 담당
   - 프리셋을 바꾸면 WL/WW는 해당 preset의 기본값으로 리셋 (예: BONE → WL=400/WW=1500, SOFT → WL=50/WW=400, LUNG → WL=-600/WW=1500)
-- 라이브러리 API: `TransferFunction1D.setWindowLevel(level, width)`가 `domain` 재매핑 + control points 재배치 후 `buildLut()` 트리거
-  - 셰이더는 변경 없음 (LUT만 다시 샘플)
+- 라이브러리 API: `VolumeRenderer.setWindowLevel(level, width)` → `VolumeCore.setWindowLevel` → `RayMarchPass.setWindowLevel` (셰이더 uniform 업데이트)
+  - **`TransferFunction1D`는 변경 없음** (LUT은 순수 color curve로 남음)
 
 ### 7.3 Step / ERT 슬라이더 (기존 유지)
 
@@ -211,7 +212,7 @@
 
 [WL/WW slider] ─► controller.setWindowLevel(level, width)
                      │
-                     └─► vol.setWindowLevel(level, width) → TransferFunction1D.setWindowLevel/Width(level, width) → rebuild LUT with windowing → rayMarch.setTransferFunction(lut)
+                     └─► vol.setWindowLevel(level, width) → VolumeCore → RayMarchPass.setWindowLevel(level, width) → 셰이더 uniform (uWindowLevel, uWindowWidth) 업데이트. LUT은 재빌드/재업로드하지 않음.
 
 [Step/ERT slider] ─► vol.setStepSize(v) / vol.setEarlyRayTermination(v)  (기존)
 
@@ -257,28 +258,47 @@ Render loop: tick() 안에 knot 회전 + controls.update() + renderer.render()
 - `LUNG_PRESET: TransferFunction` 신규 export
   - domain `[-1100, -200]` (폐 공기/연부조직 범위)
   - controlPoints: 공기(투명) → 폐 실질(연한 청회색) → 연부조직(살짝) → 혈관(선)
-- `TransferFunction1D`에 `setWindowLevel(level, width)` 추가
-  - 현재 `domain`을 `[level - width/2, level + width/2]`로 재매핑
-  - 기존 control points의 density를 새 domain에 대해 비례 재배치 (즉, 가장 작은/큰 control point가 새 domain 경계에 맞춰 정규화)
-  - `buildLut()`을 호출해 LUT 재빌드
-- 결정: 슬라이더 동작 모델은 7.2절에 명시 (프리셋 위에 윈도잉). preset 선택 시 라이브러리가 그 preset의 기본 level/width로 reset (라이브러리 `setTransferFunction`이 `setWindowLevel`을 무효화)
+- `TransferFunction1D`는 **변경 없음** (LUT은 순수 color curve로 남음)
+
+### 10.1a `src/core/shaders/ray-march.glsl.ts` (셰이더 변경 — A 방향)
+
+- `uniform float uWindowLevel;` 추가
+- `uniform float uWindowWidth;` 추가
+- 정규화 공식 변경:
+  - 기존: `float normDensity = (density + 1024.0) / 5119.0;`
+  - 신규: `float normDensity = clamp((density - (uWindowLevel - uWindowWidth * 0.5)) / uWindowWidth, 0.0, 1.0);`
+- 결정 이유: 셰이더가 LUT의 domain을 안 쓰고 있어서 LUT 재매핑은 시각적으로 no-op이었음. 셰이더에서 직접 WL/WW 정규화하는 것이 표준 radiology 워크플로우.
 
 ### 10.2 `src/renderer/presets.ts`
 
 - `CBCT_PRESETS`에 `lung: LUNG_PRESET as TransferFunction` 추가
 
-### 10.3 `src/renderer/volume-renderer.ts`
+### 10.3 `src/renderer/presets.ts` + preset defaults
+
+- `CBCT_PRESETS.lung` 추가 (Task 2)
+- `CBCT_PRESET_DEFAULTS: Record<PresetName, { level: number, width: number }>` 신규 export
+  - `bone`: `{ level: 400, width: 1500 }` — 뼈
+  - `softTissue`: `{ level: 50, width: 400 }` — 연부조직
+  - `lung`: `{ level: -600, width: 1500 }` — 폐
+- `VolumeRenderer.setPreset(name)`이 TF와 defaults 둘 다 적용
+
+### 10.4 `src/renderer/volume-renderer.ts`
 
 - `setWindowLevel(level: number, width: number): void` 추가
-- `setPreset(name: 'bone' | 'softTissue' | 'lung'): void` 추가 (라이브러리 디폴트는 cbct-viewer-demo에서 쓸 일은 없을 수도 있지만 일관성 위해)
+- `setPreset(name: PresetName): void` 추가 — TF + CBCT_PRESET_DEFAULTS[name] 둘 다 적용
 
-### 10.4 영향받지 않는 파일 (라이브러리)
+### 10.5 영향받지 않는 파일 (라이브러리)
 
 - `src/three/volume-core.ts` — `setVolume`의 mesh scale, 카메라 fit 그대로
-- `src/three/back-face-pass.ts`, `src/three/ray-march-pass.ts` — 셰이더/파이프라인 그대로
-- `src/core/shaders/*` — 셰이더 변경 없음
+- `src/three/back-face-pass.ts` — 그대로
 - `src/dicom/dicom-adapter.ts` — DICOM 파싱 그대로
-- 기존 테스트 — 모두 그대로
+- 기존 테스트 (transfer-function, shaders, volume-core) — 셰이더 substring 매칭은 갱신 필요, 나머지 그대로
+
+### 10.6 셰이더 변경 (A 방향 결정)
+
+ray-march 셰이더에 WL/WW uniform 두 개 추가. LUT는 그대로. **셰이더가 직접 WL/WW로 density를 [0,1] 정규화**하고 LUT을 샘플.
+
+이유: 이전 spec은 LUT domain 재매핑으로 WL/WW을 구현하려 했지만, 셰이더가 LUT의 domain을 사용하지 않고 hardcoded `(density + 1024) / 5119`로 정규화했기 때문에 시각적으로 no-op이었음. 셰이더에서 직접 WL/WW 정규화하는 것이 표준 radiology 워크플로우.
 
 ## 11. cbct-viewer-demo 파일 변경
 
