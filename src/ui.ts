@@ -1,10 +1,17 @@
-import { CBCT_PRESETS, type TransferFunction } from '@volgl/renderer';
+import {
+  CBCT_PRESETS,
+  type PresetName,
+  type TransferFunction,
+  type VolumeData
+} from '@volgl/renderer';
 
 export interface VolumeController {
   setStepSize(size: number): void;
   setEarlyRayTermination(t: number): void;
   setTransferFunction(tf: TransferFunction): void;
-  setVolume(files: File[]): Promise<void>;
+  setWindowLevel(level: number, width: number): void;
+  setPreset(name: PresetName): void;
+  setVolume(files: File[]): Promise<VolumeData>;
 }
 
 export interface UiHandlers {
@@ -13,6 +20,9 @@ export interface UiHandlers {
 
 export interface UiBindings {
   setStatus(text: string, kind?: 'info' | 'error' | 'progress'): void;
+  setVolumeInfo(text: string): void;
+  setFps(text: string): void;
+  setResetEnabled(enabled: boolean): void;
 }
 
 /**
