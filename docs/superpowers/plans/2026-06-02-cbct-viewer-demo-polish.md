@@ -4,7 +4,7 @@
 
 **Goal:** Upgrade `cbct-viewer-demo` to a professional demo with polished dark/orange theme, WL/WW sliders, LUNG preset, animated torus knot, camera reset, and an integrated dim/extent/FPS status line — backed by a small library API extension in `VolGL`.
 
-**Architecture:** The plan is split into two phases. **Phase 1 (Tasks 1–4)** adds three small things to the `VolGL` library (`LUNG_PRESET` export, `TransferFunction1D.setWindowLevel`, `VolumeRenderer.setWindowLevel`/`setPreset`) with TDD. **Phase 2 (Tasks 5–11)** consumes those APIs in `cbct-viewer-demo` to build the polished UI. Each task lands in one repo with its own commit.
+**Architecture:** The plan is split into two phases. **Phase 1 (Tasks 1–4)** adds three small things to the `VolGL` library (`LUNG_PRESET` export, ray-march shader `uWindowLevel`/`uWindowWidth` uniforms with `RayMarchPass.setWindowLevel`, `VolumeRenderer.setWindowLevel`/`setPreset` + `CBCT_PRESET_DEFAULTS`) with TDD where applicable. **Phase 2 (Tasks 5–11)** consumes those APIs in `cbct-viewer-demo` to build the polished UI. Each task lands in one repo with its own commit.
 
 **Tech Stack:** Three.js 0.170, Vite 8, TypeScript 5.4, Vitest. UI is plain HTML + CSS (no framework).
 
@@ -236,11 +236,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 3: Add `setWindowLevel(level, width)` to `TransferFunction1D` (TDD)
+### Task 3: Add WL/WW uniforms to the ray-march shader + `setWindowLevel` on `RayMarchPass`
 
 **Files:**
-- Modify: `/Users/fotogrammer/Projects/VolGL/src/core/transfer-function.ts` (add method to `TransferFunction1D` class)
-- Modify: `/Users/fotogrammer/Projects/VolGL/src/__tests__/core/transfer-function-presets.test.ts` (append new tests)
+- Modify: `/Users/fotogrammer/Projects/VolGL/src/core/shaders/ray-march.glsl.ts` (add `uWindowLevel` / `uWindowWidth` uniforms, change normalization)
+- Modify: `/Users/fotogrammer/Projects/VolGL/src/three/ray-march-pass.ts` (add the two uniforms to the material, add `setWindowLevel` method)
+- Modify: `/Users/fotogrammer/Projects/VolGL/src/__tests__/core/shaders.test.ts` (add tests for the new uniforms and the new normalization line)
 
 **Step 0: cd**
 
@@ -248,146 +249,155 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 cd /Users/fotogrammer/Projects/VolGL
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing shader test**
 
-Append to `src/__tests__/core/transfer-function-presets.test.ts`:
+Edit `src/__tests__/core/shaders.test.ts`. Add these tests inside the existing `describe('shader sources', () => { ... })` block (or a new sibling block — either is fine):
 
 ```ts
-import { TransferFunction1D } from '../../core/transfer-function.js';
-
-describe('TransferFunction1D.setWindowLevel', () => {
-  it('updates the domain to [level - width/2, level + width/2]', () => {
-    const tf = new TransferFunction1D(CBCT_BONE_PRESET);
-    tf.setWindowLevel(400, 1500);
-    const lut = tf.buildLut();
-    // The LUT is built by sampling the (remapped) control points across
-    // the new domain. The midpoint (index 128) of the LUT should be
-    // the color of a control point that is at the level (400) — for
-    // CBCT_BONE_PRESET, the closest control point is at density 200
-    // (color 0.9, 0.6, 0.5) and the next is at 800. After remap to
-    // domain [-350, 1150], density 400 maps to LUT index
-    //   (400 - (-350)) / (1150 - (-350)) * 255  ≈ 158.
-    // It should fall in the segment between density 200 and 800.
-    const mid = lut[128 * 4 + 0];
-    // The red channel of the 200..800 segment rises from 0.9 to 1.0.
-    // 400 is at t = (400 - 200) / (800 - 200) = 1/3 of that segment,
-    // but BEFORE remap, the 200 control point is at its new density,
-    // and 400 is somewhere in the middle. We just verify the value
-    // is in a sensible range — not the boundary value at the new
-    // domain max.
-    expect(mid).toBeGreaterThan(150);   // not the air-transparent value
-    expect(mid).toBeLessThan(255);
+  it('ray-march shader declares uWindowLevel and uWindowWidth uniforms', () => {
+    expect(RAY_MARCH_FRAGMENT).toMatch(/uniform\s+float\s+uWindowLevel/);
+    expect(RAY_MARCH_FRAGMENT).toMatch(/uniform\s+float\s+uWindowWidth/);
   });
 
-  it('rebuilds the LUT so windowing changes the output', () => {
-    const tf = new TransferFunction1D(CBCT_BONE_PRESET);
-    const lutBefore = tf.buildLut();
-    tf.setWindowLevel(50, 200);   // narrow soft-tissue window
-    const lutAfter = tf.buildLut();
-    // Some LUT entry should differ.
-    let differs = false;
-    for (let i = 0; i < 256 * 4; i++) {
-      if (lutBefore[i] !== lutAfter[i]) { differs = true; break; }
-    }
-    expect(differs).toBe(true);
+  it('ray-march shader normalizes density using uWindowLevel/uWindowWidth (no hardcoded +1024 / 5119)', () => {
+    // After A-direction change, the normalization is
+    //   clamp((density - (uWindowLevel - uWindowWidth * 0.5)) / uWindowWidth, 0.0, 1.0)
+    // and the old hardcoded "(density + 1024.0) / 5119.0" must be gone.
+    expect(RAY_MARCH_FRAGMENT).not.toMatch(/density\s*\+\s*1024\.0\s*\)\s*\/\s*5119\.0/);
+    expect(RAY_MARCH_FRAGMENT).toMatch(/clamp\s*\(\s*\(\s*density\s*-\s*\(?\s*uWindowLevel/);
+    expect(RAY_MARCH_FRAGMENT).toMatch(/uWindowWidth\s*\*\s*0\.5\s*\)?\s*\)\s*\/\s*uWindowWidth\s*,\s*0\.0\s*,\s*1\.0\s*\)/);
   });
-
-  it('preserves the shape of the transfer function (control points remap proportionally)', () => {
-    // CBCT_BONE_PRESET has control points at -1000, -500, -100, 200, 800, 1500, 4000.
-    // After setWindowLevel(400, 1500) the domain becomes [-350, 1150].
-    // The relative ordering and shape should be preserved.
-    const tf = new TransferFunction1D(CBCT_BONE_PRESET);
-    tf.setWindowLevel(400, 1500);
-    const lut = tf.buildLut();
-    // The LUT is monotone in opacity where the original transfer
-    // function is monotone. Verify that the alpha at the low-density
-    // end is still very low (air still transparent) and the alpha at
-    // the high-density end is high (bone still opaque).
-    const alphaLow = lut[0 * 4 + 3];
-    const alphaHigh = lut[255 * 4 + 3];
-    expect(alphaLow).toBeLessThan(64);
-    expect(alphaHigh).toBeGreaterThan(192);
-  });
-});
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test, expect failure**
 
-Run: `npx vitest run src/__tests__/core/transfer-function-presets.test.ts`
-Expected: FAIL — `TransferFunction1D.setWindowLevel is not a function`.
+Run: `npx vitest run src/__tests__/core/shaders.test.ts`
+Expected: FAIL — the new assertions don't match the current shader (no `uWindowLevel`, has the old `(density + 1024.0) / 5119.0`).
 
-- [ ] **Step 3: Implement `setWindowLevel`**
+- [ ] **Step 3: Add the uniforms and change the normalization in the shader**
 
-Edit `src/core/transfer-function.ts`. In the `TransferFunction1D` class, add this method right after `setTransferFunction` (after line 61, before `buildLut`):
+Edit `src/core/shaders/ray-march.glsl.ts`. Replace the current `RAY_MARCH_FRAGMENT` (the entire `export const RAY_MARCH_FRAGMENT = \`...\`;` block) with the new content. The current top of the fragment source is:
+
+```glsl
+export const RAY_MARCH_FRAGMENT = `in vec3 vPosition;
+
+uniform sampler2D uBackFace;
+uniform sampler3D uVolume;
+uniform sampler2D uTransferFunction;
+uniform vec2 uScreenSize;
+uniform float uStepSize;
+uniform float uEarlyRayTermination;
+```
+
+Change the `uniform` block to add `uWindowLevel` and `uWindowWidth`:
+
+```glsl
+export const RAY_MARCH_FRAGMENT = `in vec3 vPosition;
+
+uniform sampler2D uBackFace;
+uniform sampler3D uVolume;
+uniform sampler2D uTransferFunction;
+uniform vec2 uScreenSize;
+uniform float uStepSize;
+uniform float uEarlyRayTermination;
+uniform float uWindowLevel;
+uniform float uWindowWidth;
+```
+
+And inside `main()`, replace the line `float normDensity = (density + 1024.0) / 5119.0;` with:
+
+```glsl
+    float normDensity = clamp((density - (uWindowLevel - uWindowWidth * 0.5)) / uWindowWidth, 0.0, 1.0);
+```
+
+Also update the file's top-of-file doc comment block (lines 1-16) to mention the new uniforms — add a bullet: `  uBackFace, uVolume, uTransferFunction, uScreenSize`  →  `  uBackFace, uVolume, uTransferFunction, uScreenSize, uWindowLevel, uWindowWidth`.
+
+- [ ] **Step 4: Run the test, verify it passes**
+
+Run: `npx vitest run src/__tests__/core/shaders.test.ts`
+Expected: PASS — the existing 2 shader tests still pass, the 2 new ones now pass.
+
+- [ ] **Step 5: Add `setWindowLevel` to `RayMarchPass`**
+
+Edit `src/three/ray-march-pass.ts`. Find the class. You'll need to:
+
+1. Add a private field for the two uniforms:
 
 ```ts
-  /**
-   * Apply a window/level to the current transfer function. The domain
-   * becomes `[level - width/2, level + width/2]`, and existing control
-   * points are remapped proportionally into the new domain so that the
-   * SHAPE of the colour/opacity curve is preserved (only the visible
-   * HU range changes — this is the radiology workflow).
-   *
-   * Re-builds the LUT in place; callers can also call `buildLut()`
-   * afterwards to retrieve it.
-   */
+  private windowLevel: number = 400;
+  private windowWidth: number = 1500;
+```
+
+(Place these near the other private fields like `stepSize`, `earlyRayTerm`.)
+
+2. In the constructor (or wherever `setUniform`/`setStepSize` are wired), add:
+
+```ts
+    this.material.uniforms.uWindowLevel = { value: this.windowLevel };
+    this.material.uniforms.uWindowWidth = { value: this.windowWidth };
+```
+
+(Place this right after the existing `setStepSize` / `setEarlyRayTermination` uniform assignments.)
+
+3. Add the public method on the class:
+
+```ts
   setWindowLevel(level: number, width: number): void {
     if (width <= 0) {
       throw new Error(`setWindowLevel: width must be > 0, got ${width}`);
     }
-    const newMin = level - width / 2;
-    const newMax = level + width / 2;
-    const oldMin = this.domain.min;
-    const oldMax = this.domain.max;
-    const oldSpan = oldMax - oldMin;
-    if (oldSpan <= 0) {
-      // Defensive: degenerate domain, just reset and bail.
-      this.domain = { min: newMin, max: newMax };
-      return;
-    }
-    const newSpan = newMax - newMin;
-    this.controlPoints = this.controlPoints.map((p) => ({
-      ...p,
-      density: newMin + ((p.density - oldMin) / oldSpan) * newSpan,
-    }));
-    this.domain = { min: newMin, max: newMax };
+    this.windowLevel = level;
+    this.windowWidth = width;
+    this.material.uniforms.uWindowLevel.value = level;
+    this.material.uniforms.uWindowWidth.value = width;
   }
 ```
 
-- [ ] **Step 4: Run the test, verify it passes**
+(Place this near `setStepSize` / `setEarlyRayTermination`.)
 
-Run: `npx vitest run src/__tests__/core/transfer-function-presets.test.ts`
-Expected: PASS — the original 4 LUNG tests plus the 3 new `setWindowLevel` tests.
+> Note: this is NOT a TDD task — Three.js shader uniforms are not exercised in the existing test suite. We rely on the manual smoke test in Task 10. If the engineer wants a unit test here, they can add a `RayMarchPass` test that constructs the class (with a mock WebGLRenderer) and asserts the uniform values after `setWindowLevel`. But the existing pattern in `src/__tests__/three/volume-core.test.ts` is light-touch (just verifies the setter doesn't throw on a constructed instance). Mirror that pattern.
 
-- [ ] **Step 5: Run the full test suite**
+- [ ] **Step 6: Run typecheck — expect errors in `VolumeCore` / `VolumeRenderer` (next task)**
 
-Run: `npm test`
-Expected: all tests pass.
+Run: `npm run typecheck`
+Expected: clean (the new shader uniforms default to sensible values, and `setWindowLevel` on `RayMarchPass` is just an addition).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit (VolGL)**
 
 ```bash
 cd /Users/fotogrammer/Projects/VolGL
-git add src/core/transfer-function.ts src/__tests__/core/transfer-function-presets.test.ts
-git commit -m "feat(transfer-function): add setWindowLevel(level, width) to TransferFunction1D
+git add src/core/shaders/ray-march.glsl.ts src/three/ray-march-pass.ts src/__tests__/core/shaders.test.ts
+git commit -m "feat(ray-march): add uWindowLevel/uWindowWidth uniforms + setWindowLevel
 
-Re-maps the transfer function's domain to [level - width/2,
-level + width/2] and remaps existing control points proportionally
-so the shape of the colour/opacity curve is preserved. The
-shader is unchanged — only the LUT is rebuilt.
+The previous ray-march shader normalised density with a hardcoded
+(density + 1024) / 5119, ignoring any window/level the user set
+on the transfer function. This made WL/WW sliders a no-op
+visually — only the LUT changed (and even that was byte-identical
+under proportional control-point remap).
 
-This is the radiology workflow: pick a preset for the colour
-curve, then sweep WL/WW to inspect different HU ranges.
+This change adds uWindowLevel and uWindowWidth uniforms and uses
+them directly in the density normalisation:
+
+  t = clamp((density - (level - width/2)) / width, 0, 1)
+
+The LUT now stays a pure color curve; windowing is applied per
+fragment. The LUT is not rebuilt when WL/WW changes, so the
+expensive texture upload is skipped.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 4: Add `setWindowLevel` and `setPreset` to `VolumeRenderer`
+### Task 4: Add `setWindowLevel` + `setPreset` delegation through VolumeCore/VolumeRenderer + preset defaults
 
 **Files:**
-- Modify: `/Users/fotogrammer/Projects/VolGL/src/renderer/volume-renderer.ts` (add two methods, import PresetName)
+- Modify: `/Users/fotogrammer/Projects/VolGL/src/renderer/presets.ts` (add `CBCT_PRESET_DEFAULTS` export)
+- Modify: `/Users/fotogrammer/Projects/VolGL/src/renderer/presets.ts` (already exports `CBCT_PRESETS` and `PresetName` from Task 2)
+- Modify: `/Users/fotogrammer/Projects/VolGL/src/renderer/index.ts` (re-export `CBCT_PRESET_DEFAULTS`)
+- Modify: `/Users/fotogrammer/Projects/VolGL/src/renderer/volume-renderer.ts` (add `setWindowLevel` + `setPreset`)
+- Modify: `/Users/fotogrammer/Projects/VolGL/src/three/volume-core.ts` (add `setWindowLevel` that delegates to rayMarch)
+- Create: `/Users/fotogrammer/Projects/VolGL/src/__tests__/renderer/volume-renderer.test.ts` (integration test for the new methods)
 
 **Step 0: cd**
 
@@ -395,18 +405,40 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 cd /Users/fotogrammer/Projects/VolGL
 ```
 
-- [ ] **Step 1: No new test — this method is a thin pass-through to `VolumeCore`**
+- [ ] **Step 1: Add `CBCT_PRESET_DEFAULTS` to `presets.ts`**
 
-VolumeRenderer's role is to delegate. We test the underlying behavior in Task 3 and via the existing `setTransferFunction` test. Adding a delegation test would just test the wiring, which is more usefully covered by the existing `setTransferFunction` test plus the integration smoke test in Task 11.
+Edit `src/renderer/presets.ts`. Append this block at the end of the file (after the `PresetName` type):
 
-- [ ] **Step 2: Add a small integration test that exercises the public API**
+```ts
+/**
+ * Default window/level for each preset. When the user picks a preset
+ * via {@link VolumeRenderer.setPreset}, the WL/WW sliders snap to these
+ * values.
+ */
+export const CBCT_PRESET_DEFAULTS: Record<PresetName, { level: number; width: number }> = {
+  bone:       { level: 400,  width: 1500 },
+  softTissue: { level: 50,   width: 400 },
+  lung:       { level: -600, width: 1500 },
+};
+```
+
+- [ ] **Step 2: Re-export `CBCT_PRESET_DEFAULTS` from the public entry**
+
+Edit `src/renderer/index.ts`. Add a new line below the existing `CBCT_PRESETS, type PresetName` re-export:
+
+```ts
+export { CBCT_PRESETS, CBCT_PRESET_DEFAULTS, type PresetName } from './presets.js';
+```
+
+- [ ] **Step 3: Write the failing test**
 
 Create `src/__tests__/renderer/volume-renderer.test.ts`:
 
 ```ts
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { VolumeRenderer } from '../../renderer/volume-renderer.js';
 import { Group } from 'three';
+import { CBCT_PRESET_DEFAULTS } from '../../renderer/presets.js';
 
 describe('VolumeRenderer', () => {
   let vol: VolumeRenderer;
@@ -428,38 +460,45 @@ describe('VolumeRenderer', () => {
     expect(() => vol.setPreset('lung')).not.toThrow();
   });
 
+  it('CBCT_PRESET_DEFAULTS has the expected level/width for each preset', () => {
+    expect(CBCT_PRESET_DEFAULTS.bone).toEqual({ level: 400, width: 1500 });
+    expect(CBCT_PRESET_DEFAULTS.softTissue).toEqual({ level: 50, width: 400 });
+    expect(CBCT_PRESET_DEFAULTS.lung).toEqual({ level: -600, width: 1500 });
+  });
+
   it('dispose() prevents further API calls', () => {
     vol.dispose();
-    expect(() => vol.setStepSize(0.01)).not.toThrow(); // disposed methods are no-ops
+    expect(() => vol.setStepSize(0.01)).not.toThrow();   // disposed methods are no-ops
     expect(() => vol.setWindowLevel(400, 1500)).not.toThrow();
   });
 });
 ```
 
-- [ ] **Step 3: Run test, expect failure (methods missing)**
+- [ ] **Step 4: Run test, expect failure (methods missing)**
 
 Run: `npx vitest run src/__tests__/renderer/volume-renderer.test.ts`
-Expected: FAIL — `vol.setWindowLevel is not a function`.
+Expected: FAIL — `vol.setWindowLevel is not a function` and `CBCT_PRESET_DEFAULTS` undefined.
 
-- [ ] **Step 4: Implement the methods**
+- [ ] **Step 5: Implement `setWindowLevel` and `setPreset` on `VolumeRenderer`**
 
 Edit `src/renderer/volume-renderer.ts`:
 
-1. Update imports (line 5) to also import `PresetName`:
+1. Update the import from `./presets.js` to also import `CBCT_PRESET_DEFAULTS`:
 
 ```ts
-import { CBCT_PRESETS, type PresetName } from './presets.js';
+import { CBCT_PRESETS, CBCT_PRESET_DEFAULTS, type PresetName } from './presets.js';
 ```
 
 2. Add these methods to the `VolumeRenderer` class. Place them right after `setTransferFunction` (after line 86), before `setStepSize`:
 
 ```ts
   /**
-   * Apply a window/level to the current transfer function. See
-   * {@link TransferFunction1D.setWindowLevel} for the semantics.
+   * Apply a window/level. The two values are pushed to the ray-march
+   * shader as `uWindowLevel` / `uWindowWidth` uniforms; the LUT is
+   * not rebuilt. After this call, the visible HU range becomes
+   * [level - width/2, level + width/2].
    *
-   * Does nothing if no volume has been set or if the renderer has
-   * been disposed.
+   * Does nothing if the renderer has been disposed.
    */
   setWindowLevel(level: number, width: number): void {
     if (this.disposed) return;
@@ -467,47 +506,54 @@ import { CBCT_PRESETS, type PresetName } from './presets.js';
   }
 
   /**
-   * Reset the transfer function to one of the built-in presets. After
-   * calling this the WL/WW state is reset to that preset's defaults.
+   * Switch to one of the built-in presets. Sets the transfer function
+   * AND resets WL/WW to the preset's defaults (see
+   * {@link CBCT_PRESET_DEFAULTS}).
    */
   setPreset(name: PresetName): void {
     if (this.disposed) return;
     this.core.setTransferFunction(CBCT_PRESETS[name]);
+    const def = CBCT_PRESET_DEFAULTS[name];
+    this.core.setWindowLevel(def.level, def.width);
   }
 ```
 
-- [ ] **Step 5: Add `setWindowLevel` to `VolumeCore`**
+- [ ] **Step 6: Add `setWindowLevel` to `VolumeCore`**
 
-Edit `src/three/volume-core.ts`. Add this method right after `setTransferFunction` (after line 87), before `setStepSize`:
+Edit `src/three/volume-core.ts`. Add this method right after `setTransferFunction` (after line 87, before `setStepSize`):
 
 ```ts
   setWindowLevel(level: number, width: number): void {
     if (this.disposed) return;
-    this.transferFunction.setWindowLevel(level, width);
-    this.rayMarch.setTransferFunction(this.transferFunction.buildLut());
+    this.rayMarch.setWindowLevel(level, width);
   }
 ```
 
-- [ ] **Step 6: Run the test, verify it passes**
+(Note: we don't touch `TransferFunction1D` — the LUT stays a pure color curve.)
+
+- [ ] **Step 7: Run the test, verify it passes**
 
 Run: `npx vitest run src/__tests__/renderer/volume-renderer.test.ts`
-Expected: PASS, 4 tests green.
+Expected: PASS, 5 tests green.
 
-- [ ] **Step 7: Run the full test suite + typecheck**
+- [ ] **Step 8: Run the full test suite + typecheck**
 
 Run: `npm test && npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 cd /Users/fotogrammer/Projects/VolGL
-git add src/renderer/volume-renderer.ts src/three/volume-core.ts src/__tests__/renderer/volume-renderer.test.ts
-git commit -m "feat(renderer): expose setWindowLevel + setPreset on VolumeRenderer
+git add src/renderer/presets.ts src/renderer/index.ts src/renderer/volume-renderer.ts src/three/volume-core.ts src/__tests__/renderer/volume-renderer.test.ts
+git commit -m "feat(renderer): setWindowLevel + setPreset via shader uniforms
 
-Thin pass-throughs to VolumeCore. setWindowLevel applies WL/WW
-on top of the current preset; setPreset resets to one of the
-built-in CBCT_PRESETS values.
+- setWindowLevel pushes level/width to the ray-march shader
+  uniforms (added in the previous commit); the LUT is not rebuilt.
+- setPreset selects the preset TF AND snaps WL/WW to the
+  preset's defaults from CBCT_PRESET_DEFAULTS.
+- CBCT_PRESET_DEFAULTS is re-exported from the public entry so
+  consumers can read (and override) the defaults.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
