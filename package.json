@@ -1,0 +1,21 @@
+{
+  "name": "cbct-viewer-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Demo of @volgl/renderer integrated with a Three.js scene containing regular meshes",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vite": "^8.0.12",
+    "@types/three": "^0.184.0"
+  }
+}

@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CBCT Viewer Demo — @volgl/renderer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0e1116;
+        --panel: #161b22;
+        --border: #30363d;
+        --text: #c9d1d9;
+        --muted: #8b949e;
+        --accent: #ff8a3d;
+        --accent-2: #58a6ff;
+        --danger: #f85149;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        overflow: hidden;
+      }
+      #app {
+        display: grid;
+        grid-template-columns: 1fr 320px;
+        width: 100vw;
+        height: 100vh;
+      }
+      #scene {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(180deg, #0a0d12 0%, #14181f 100%);
+      }
+      #ui {
+        background: var(--panel);
+        border-left: 1px solid var(--border);
+        padding: 18px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+      .subtitle {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      #drop {
+        border: 2px dashed var(--accent);
+        border-radius: 10px;
+        padding: 22px 14px;
+        text-align: center;
+        color: var(--text);
+        font-size: 14px;
+        cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease;
+      }
+      #drop.over {
+        background: rgba(255, 138, 61, 0.08);
+        border-color: var(--accent-2);
+      }
+      #drop .hint {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      #status {
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--muted);
+        word-break: break-word;
+        min-height: 16px;
+      }
+      #status.error { color: var(--danger); }
+      #status.progress { color: var(--accent-2); }
+      .group {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .group label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .group label .val {
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
+      }
+      input[type="range"] {
+        width: 100%;
+        accent-color: var(--accent);
+      }
+      button {
+        background: #21262d;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 12px;
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease;
+      }
+      button:hover { background: #30363d; }
+      button.primary {
+        background: var(--accent);
+        color: #0e1116;
+        border-color: var(--accent);
+        font-weight: 600;
+      }
+      button.primary:hover { filter: brightness(1.05); }
+      .footer {
+        margin-top: auto;
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .footer code {
+        background: #0d1117;
+        padding: 1px 5px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="scene"></canvas>
+      <aside id="ui">
+        <div>
+          <h1>CBCT Viewer Demo</h1>
+          <p class="subtitle">@volgl/renderer &middot; Three.js scene integration</p>
+        </div>
+
+        <div id="drop">
+          <strong>Drop DICOM files here</strong>
+          <div class="hint">or click to select a folder of <code>.dcm</code> slices</div>
+          <input id="filepicker" type="file" multiple accept=".dcm,application/dicom" hidden />
+        </div>
+
+        <div id="status">Awaiting DICOM data.</div>
+
+        <div class="group">
+          <label>Step size <span class="val" id="stepSizeVal">0.010</span></label>
+          <input id="stepSize" type="range" min="0.001" max="0.05" step="0.001" value="0.01" />
+        </div>
+
+        <div class="group">
+          <label>Early ray termination <span class="val" id="ertVal">0.99</span></label>
+          <input id="ert" type="range" min="0.5" max="1.0" step="0.01" value="0.99" />
+        </div>
+
+        <button id="presetBtn" class="primary">Preset: bone</button>
+
+        <div class="group">
+          <label>
+            <span>Auto-rotate</span>
+            <input id="autoRotate" type="checkbox" />
+          </label>
+        </div>
+
+        <div class="footer">
+          The CBCT volume shares the camera, <code>OrbitControls</code>, and depth buffer with the other
+          meshes (axes, grid, cube, torus knot, ground plane). Drag to orbit, scroll to zoom.
+        </div>
+      </aside>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
