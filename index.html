@@ -9,12 +9,19 @@
         color-scheme: dark;
         --bg: #0e1116;
         --panel: #161b22;
+        --panel-2: #1c232c;
         --border: #30363d;
+        --border-strong: #3a4148;
         --text: #c9d1d9;
         --muted: #8b949e;
         --accent: #ff8a3d;
         --accent-2: #58a6ff;
+        --accent-grad: linear-gradient(135deg, #ff8a3d 0%, #58a6ff 100%);
         --danger: #f85149;
+        --radius-card: 8px;
+        --radius-chip: 10px;
+        --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset,
+                       0 4px 14px rgba(0, 0, 0, 0.4);
       }
       * { box-sizing: border-box; }
       html, body {
@@ -87,10 +94,39 @@
       }
       #status.error { color: var(--danger); }
       #status.progress { color: var(--accent-2); }
+      .status-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 8px;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-card);
+        padding: 8px 12px;
+        font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        box-shadow: var(--shadow-card);
+      }
+      .status-row .vol-info { color: var(--text); }
+      .status-row .fps { color: var(--muted); }
       .group {
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: 8px;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-card);
+        padding: 12px 14px;
+        box-shadow: var(--shadow-card);
+      }
+      .group > h2 {
+        margin: 0 0 2px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.6px;
+        text-transform: uppercase;
+        color: var(--muted);
       }
       .group label {
         display: flex;
@@ -101,27 +137,63 @@
       .group label .val {
         color: var(--text);
         font-variant-numeric: tabular-nums;
+        font-size: 12px;
       }
       input[type="range"] {
         width: 100%;
         accent-color: var(--accent);
+        height: 18px; /* bigger hit area */
       }
-      button {
-        background: #21262d;
+      .chip-row {
+        display: flex;
+        gap: 6px;
+      }
+      .chip {
+        flex: 1;
+        text-align: center;
+        background: transparent;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-chip);
+        padding: 5px 10px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+      }
+      .chip:hover { background: rgba(255, 138, 61, 0.06); color: var(--text); }
+      .chip.active {
+        background: var(--accent-grad);
+        color: #0e1116;
+        border-color: transparent;
+        font-weight: 600;
+      }
+      button.ghost {
+        background: transparent;
         color: var(--text);
         border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 8px 12px;
-        font-size: 13px;
+        border-radius: var(--radius-card);
+        padding: 6px 10px;
+        font-size: 12px;
         cursor: pointer;
-        transition: background 120ms ease, border-color 120ms ease;
+        width: 100%;
+        transition: background 120ms ease;
       }
-      button:hover { background: #30363d; }
+      button.ghost:hover:not(:disabled) { background: rgba(255, 138, 61, 0.06); }
+      button.ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+      button {
+        font-family: inherit;
+      }
       button.primary {
         background: var(--accent);
         color: #0e1116;
-        border-color: var(--accent);
+        border: 1px solid var(--accent);
+        border-radius: var(--radius-card);
+        padding: 8px 12px;
+        font-size: 13px;
         font-weight: 600;
+        cursor: pointer;
+        transition: filter 120ms ease;
       }
       button.primary:hover { filter: brightness(1.05); }
       .footer {
@@ -153,22 +225,41 @@
           <input id="filepicker" type="file" multiple accept=".dcm,application/dicom" hidden />
         </div>
 
+        <div class="status-row">
+          <span class="vol-info" id="volInfo">—</span>
+          <span class="fps" id="fps">—</span>
+        </div>
         <div id="status">Awaiting DICOM data.</div>
 
         <div class="group">
-          <label>Step size <span class="val" id="stepSizeVal">0.010</span></label>
-          <input id="stepSize" type="range" min="0.001" max="0.05" step="0.001" value="0.01" />
+          <h2>Transfer function</h2>
+          <div class="chip-row" role="tablist" aria-label="Transfer function preset">
+            <button id="chip-bone"      class="chip active" data-preset="bone"      role="tab" aria-selected="true">BONE</button>
+            <button id="chip-softTissue" class="chip"        data-preset="softTissue" role="tab" aria-selected="false">SOFT</button>
+            <button id="chip-lung"      class="chip"        data-preset="lung"       role="tab" aria-selected="false">LUNG</button>
+          </div>
+          <label>Window Level <span class="val" id="wlVal">400</span></label>
+          <input id="wl" type="range" min="-1000" max="3000" step="1" value="400" />
+          <label>Window Width <span class="val" id="wwVal">1500</span></label>
+          <input id="ww" type="range" min="50" max="4000" step="1" value="1500" />
         </div>
 
         <div class="group">
+          <h2>Render</h2>
+          <label>Step size <span class="val" id="stepSizeVal">0.010</span></label>
+          <input id="stepSize" type="range" min="0.001" max="0.05" step="0.001" value="0.01" />
           <label>Early ray termination <span class="val" id="ertVal">0.99</span></label>
           <input id="ert" type="range" min="0.5" max="1.0" step="0.01" value="0.99" />
         </div>
 
-        <button id="presetBtn" class="primary">Preset: bone</button>
+        <div class="group">
+          <h2>Camera</h2>
+          <button id="resetCam" class="ghost" disabled>Reset view</button>
+        </div>
 
         <div class="group">
-          <label>
+          <h2>Scene</h2>
+          <label style="display:flex;justify-content:space-between;align-items:center;">
             <span>Auto-rotate</span>
             <input id="autoRotate" type="checkbox" />
           </label>
