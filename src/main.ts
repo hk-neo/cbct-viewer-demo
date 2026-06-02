@@ -54,9 +54,28 @@ const sceneObjects = addSceneObjects(scene);
 const knot = sceneObjects.knot;
 
 // ---- Volume renderer -----------------------------------------------------
+// The volume data is in millimetres (e.g. 160×160×100 mm), but the rest of
+// the scene (knot, cube, grid, ground) is sized in Three.js's natural
+// unit-scale (0.3–10 units). To make the volume sit alongside those
+// objects instead of dwarfing them, we wrap the renderer in a Group and
+// scale it down. The chosen factor maps a 160 mm volume to ~3 units,
+// comparable to the grid cell footprint.
+const VOLUME_DISPLAY_SCALE = 0.02;
+
 const vol = new VolumeRenderer({ stepSize: 0.01, earlyRayTermination: 0.99 });
 const volumeRoot = new Group();
 volumeRoot.name = 'CBCTVolume';
+volumeRoot.scale.setScalar(VOLUME_DISPLAY_SCALE);
+// DICOM stores voxel data in the LPS (Left-Posterior-Superior) basis:
+//   texture X  = column index  = patient Left  → Right
+//   texture Y  = row index     = patient Post   → Ant
+//   texture Z  = slice index   = patient Sup    → Inf   (head → feet)
+// Without a reorientation, our unit box maps these directly to Three.js's
+// XYZ, which leaves the patient lying on their side (head pointing -Z).
+// Rotate +90° about X so the head (texture Z=0, box -Z) ends up at
+// +Y, and the patient's anterior (texture Y=0, box -Y) faces the camera
+// at -Z — the standard "feet-up viewer" medical-imaging pose.
+volumeRoot.rotation.x = Math.PI / 2;
 volumeRoot.add(vol.root);
 scene.add(volumeRoot);
 
@@ -83,12 +102,16 @@ function cameraFitToVolume(volume: VolumeData): void {
   const ex = sx * w;
   const ey = sy * h;
   const ez = sz * d;
-  const maxExtent = Math.max(ex, ey, ez);
+  // The volume's mesh is wrapped in a Group scaled by VOLUME_DISPLAY_SCALE,
+  // so the camera has to frame the *scaled* world-space size, not the raw
+  // physical extent. Multiplying maxExtent by the scale converts mm into
+  // the same unit space the rest of the scene uses.
+  const maxExtent = Math.max(ex, ey, ez) * VOLUME_DISPLAY_SCALE;
   const fovRad = (camera.fov * Math.PI) / 180;
   const dist = (maxExtent * 0.6) / Math.tan(fovRad * 0.5);
   camera.position.set(dist, dist * 0.75, dist);
   camera.near = Math.max(0.001, maxExtent * 0.001);
-  camera.far = maxExtent * 20;
+  camera.far = Math.max(20, maxExtent * 20);
   camera.updateProjectionMatrix();
   controls.target.set(0, 0, 0);
   controls.update();
