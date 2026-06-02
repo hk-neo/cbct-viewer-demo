@@ -16,6 +16,7 @@ export interface VolumeController {
 export interface UiHandlers {
   onAutoRotateChange(enabled: boolean): void;
   onResetView(): void;
+  onVolumeLoaded(volume: VolumeData): void;
 }
 
 export interface UiBindings {
@@ -101,9 +102,10 @@ export function bindUi(volume: VolumeController, handlers: UiHandlers): UiBindin
   async function loadFiles(files: File[]): Promise<void> {
     setStatus(`Loading ${files.length} file(s)…`, 'progress');
     try {
-      await volume.setVolume(files);
+      const data = await volume.setVolume(files);
       setStatus(`Loaded ${files.length} DICOM slice(s).`, 'info');
       setResetEnabled(true);
+      handlers.onVolumeLoaded(data);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setStatus(`Failed to load volume: ${msg}`, 'error');
