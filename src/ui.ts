@@ -1,5 +1,4 @@
 import {
-  CBCT_PRESETS,
   type PresetName,
   type TransferFunction,
   type VolumeData
@@ -16,6 +15,7 @@ export interface VolumeController {
 
 export interface UiHandlers {
   onAutoRotateChange(enabled: boolean): void;
+  onResetView(): void;
 }
 
 export interface UiBindings {
@@ -34,11 +34,20 @@ export function bindUi(volume: VolumeController, handlers: UiHandlers): UiBindin
   const drop = document.getElementById('drop') as HTMLDivElement;
   const filepicker = document.getElementById('filepicker') as HTMLInputElement;
   const status = document.getElementById('status') as HTMLDivElement;
+  const volInfo = document.getElementById('volInfo') as HTMLSpanElement;
+  const fps = document.getElementById('fps') as HTMLSpanElement;
+  const chipBone = document.getElementById('chip-bone') as HTMLButtonElement;
+  const chipSoft = document.getElementById('chip-softTissue') as HTMLButtonElement;
+  const chipLung = document.getElementById('chip-lung') as HTMLButtonElement;
+  const wl = document.getElementById('wl') as HTMLInputElement;
+  const wlVal = document.getElementById('wlVal') as HTMLSpanElement;
+  const ww = document.getElementById('ww') as HTMLInputElement;
+  const wwVal = document.getElementById('wwVal') as HTMLSpanElement;
   const stepSize = document.getElementById('stepSize') as HTMLInputElement;
   const stepSizeVal = document.getElementById('stepSizeVal') as HTMLSpanElement;
   const ert = document.getElementById('ert') as HTMLInputElement;
   const ertVal = document.getElementById('ertVal') as HTMLSpanElement;
-  const presetBtn = document.getElementById('presetBtn') as HTMLButtonElement;
+  const resetCam = document.getElementById('resetCam') as HTMLButtonElement;
   const autoRotate = document.getElementById('autoRotate') as HTMLInputElement;
 
   function setStatus(text: string, kind: 'info' | 'error' | 'progress' = 'info'): void {
@@ -48,34 +57,38 @@ export function bindUi(volume: VolumeController, handlers: UiHandlers): UiBindin
     if (kind === 'progress') status.classList.add('progress');
   }
 
+  function setVolumeInfo(text: string): void {
+    volInfo.textContent = text;
+  }
+
+  function setFpsText(text: string): void {
+    fps.textContent = text;
+  }
+
+  function setResetEnabled(enabled: boolean): void {
+    resetCam.disabled = !enabled;
+  }
+
   // ---- Drop zone ---------------------------------------------------------
   function preventDefaults(e: Event): void {
     e.preventDefault();
     e.stopPropagation();
   }
-
   ['dragenter', 'dragover', 'dragleave', 'drop'].forEach((evt) => {
     drop.addEventListener(evt, preventDefaults);
   });
-
   ['dragenter', 'dragover'].forEach((evt) => {
     drop.addEventListener(evt, () => drop.classList.add('over'));
   });
   ['dragleave', 'drop'].forEach((evt) => {
     drop.addEventListener(evt, () => drop.classList.remove('over'));
   });
-
-  // The user can drop anywhere on the document — not just on the drop zone —
-  // so that dropping on the canvas still loads the volume.
   document.addEventListener('dragover', (e) => e.preventDefault());
   document.addEventListener('drop', async (e) => {
     e.preventDefault();
     const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
-    if (files.length > 0) {
-      await loadFiles(files);
-    }
+    if (files.length > 0) await loadFiles(files);
   });
-
   drop.addEventListener('click', () => filepicker.click());
   filepicker.addEventListener('change', async () => {
     if (filepicker.files) {
@@ -90,31 +103,74 @@ export function bindUi(volume: VolumeController, handlers: UiHandlers): UiBindin
     try {
       await volume.setVolume(files);
       setStatus(`Loaded ${files.length} DICOM slice(s).`, 'info');
+      setResetEnabled(true);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setStatus(`Failed to load volume: ${msg}`, 'error');
     }
   }
 
-  // ---- Sliders -----------------------------------------------------------
+  // ---- Preset chips ------------------------------------------------------
+  const chips: Array<{ btn: HTMLButtonElement; name: PresetName }> = [
+    { btn: chipBone, name: 'bone' },
+    { btn: chipSoft, name: 'softTissue' },
+    { btn: chipLung, name: 'lung' },
+  ];
+  function activateChip(name: PresetName): void {
+    for (const c of chips) {
+      const active = c.name === name;
+      c.btn.classList.toggle('active', active);
+      c.btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    }
+  }
+  // Per-preset WL/WW defaults. Must mirror CBCT_PRESET_DEFAULTS in the library.
+  const PRESET_DEFAULTS: Record<PresetName, { level: number; width: number }> = {
+    bone:      { level: 400,  width: 1500 },
+    softTissue:{ level: 50,   width: 400 },
+    lung:      { level: -600, width: 1500 },
+  };
+  for (const c of chips) {
+    c.btn.addEventListener('click', () => {
+      activateChip(c.name);
+      volume.setPreset(c.name);
+      const def = PRESET_DEFAULTS[c.name];
+      wl.value = String(def.level);
+      ww.value = String(def.width);
+      wlVal.textContent = String(def.level);
+      wwVal.textContent = String(def.width);
+      // Re-apply the default window so the slider state is in sync
+      // with what the renderer just received from setPreset.
+      volume.setWindowLevel(def.level, def.width);
+    });
+  }
+
+  // ---- WL/WW sliders -----------------------------------------------------
+  wl.addEventListener('input', () => {
+    const v = parseFloat(wl.value);
+    wlVal.textContent = String(v);
+    volume.setWindowLevel(v, parseFloat(ww.value));
+  });
+  ww.addEventListener('input', () => {
+    const v = parseFloat(ww.value);
+    wwVal.textContent = String(v);
+    volume.setWindowLevel(parseFloat(wl.value), v);
+  });
+
+  // ---- Step / ERT sliders ------------------------------------------------
   stepSize.addEventListener('input', () => {
     const v = parseFloat(stepSize.value);
     stepSizeVal.textContent = v.toFixed(3);
     volume.setStepSize(v);
   });
-
   ert.addEventListener('input', () => {
     const v = parseFloat(ert.value);
     ertVal.textContent = v.toFixed(2);
     volume.setEarlyRayTermination(v);
   });
 
-  // ---- Preset toggle -----------------------------------------------------
-  let preset: 'bone' | 'softTissue' = 'bone';
-  presetBtn.addEventListener('click', () => {
-    preset = preset === 'bone' ? 'softTissue' : 'bone';
-    volume.setTransferFunction(CBCT_PRESETS[preset]);
-    presetBtn.textContent = `Preset: ${preset}`;
+  // ---- Reset view --------------------------------------------------------
+  resetCam.addEventListener('click', () => {
+    handlers.onResetView();
   });
 
   // ---- Auto-rotate -------------------------------------------------------
@@ -122,5 +178,5 @@ export function bindUi(volume: VolumeController, handlers: UiHandlers): UiBindin
     handlers.onAutoRotateChange(autoRotate.checked);
   });
 
-  return { setStatus };
+  return { setStatus, setVolumeInfo, setFps: setFpsText, setResetEnabled };
 }
