@@ -28,6 +28,18 @@ npm run dev
 
 Open <http://127.0.0.1:5173/> in a browser.
 
+## Features
+
+- Drop or pick a folder of `.dcm` slices to load a CBCT volume.
+- 3 transfer-function presets (BONE / SOFT / LUNG) plus a per-preset
+  Window Level / Window Width slider pair for radiology-style windowing.
+- Step size and early ray termination sliders for tuning render cost.
+- Camera reset (fit-to-volume) and FPS counter.
+- Auto-rotate toggle for hands-free viewing.
+- Coexists in the scene with axes, grid, cube, torus knot, and a
+  ground plane — all sharing the same camera, OrbitControls, and
+  depth buffer.
+
 ## How to use
 
 1. Drag a folder of DICOM `.dcm` files onto the page (or click the drop
