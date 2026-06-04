@@ -27,8 +27,11 @@ export function addSceneObjects(scene: { add: (obj: Object3D) => void }): {
   scene.add(axes);
 
   // GridHelper — 10x10 units, divided into 20 cells. Sits on the ground plane.
+  // The "ground" in this scene is the world Y=0 plane, which is also
+  // where the DICOM origin of the volume is anchored (so the patient's
+  // feet are resting on it).
   const grid = new GridHelper(10, 20, 0x444c56, 0x2a313a);
-  grid.position.y = -0.5;
+  grid.position.y = 0;
   scene.add(grid);
 
   // Decorative orange cube — proves we can compose a regular mesh with the volume.
@@ -36,7 +39,7 @@ export function addSceneObjects(scene: { add: (obj: Object3D) => void }): {
     new BoxGeometry(0.4, 0.4, 0.4),
     new MeshStandardMaterial({ color: 0xff8a3d, roughness: 0.5, metalness: 0.1 })
   );
-  cube.position.set(0.7, 0.0, 0.0);
+  cube.position.set(0.7, 0.2, 0.0);
   scene.add(cube);
 
   // Decorative blue torus knot — purely visual.
@@ -44,7 +47,7 @@ export function addSceneObjects(scene: { add: (obj: Object3D) => void }): {
     new TorusKnotGeometry(0.3, 0.08, 100, 16),
     new MeshStandardMaterial({ color: 0x58a6ff, roughness: 0.3, metalness: 0.2 })
   );
-  knot.position.set(-0.7, 0.0, 0.0);
+  knot.position.set(-0.7, 0.2, 0.0);
   scene.add(knot);
 
   // Subtle ground plane — gives the scene a floor.
@@ -57,7 +60,7 @@ export function addSceneObjects(scene: { add: (obj: Object3D) => void }): {
     })
   );
   ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -0.5;
+  ground.position.y = 0;
   scene.add(ground);
 
   return { axes, grid, cube, knot, ground };

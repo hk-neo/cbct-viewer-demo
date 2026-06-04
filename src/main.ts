@@ -11,11 +11,15 @@
 
 import {
   AmbientLight,
+  Clock,
   Color,
   DirectionalLight,
   Group,
+  Mesh,
+  MeshStandardMaterial,
   PerspectiveCamera,
   Scene,
+  SphereGeometry,
   WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -39,6 +43,38 @@ async function main(): Promise<void> {
   const renderer = new WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+
+  // ---- WebGL context loss handling --------------------------------------
+  // When the browser decides to reclaim the WebGL context (typically
+  // when the GPU runs out of memory, or the tab is sent to the
+  // background and the OS evicts the context), the canvas flashes
+  // and then stops rendering until the page is reloaded. We listen
+  // for the event so we can (a) let the user know what's happening
+  // via the status line and (b) try to recover by re-uploading the
+  // volume texture on `webglcontextrestored` if we have one cached.
+  canvas.addEventListener('webglcontextlost', (event) => {
+    event.preventDefault();
+    console.warn('[cbct-viewer-demo] WebGL context lost');
+    ui.setStatus('WebGL context lost — recovering…', 'error');
+  });
+  canvas.addEventListener('webglcontextrestored', () => {
+    console.log('[cbct-viewer-demo] WebGL context restored');
+    // The easiest correct path: if we have a volume cached, re-run
+    // setVolume on the same data so the texture gets re-uploaded to
+    // the fresh context. We do this synchronously in the next tick
+    // to make sure the renderer is in a usable state.
+    if (lastVolume) {
+      queueMicrotask(() => {
+        vol.setVolume(lastVolume!).catch((err) => {
+          ui.setStatus(`Restore failed: ${(err as Error).message}`, 'error');
+        });
+        ui.setStatus('WebGL context restored — re-uploading volume…', 'progress');
+      });
+    } else {
+      // No cached volume — ask the user to reload.
+      ui.setStatus('WebGL context restored — please re-drop DICOM files.', 'error');
+    }
+  });
 
   const scene = new Scene();
   scene.background = new Color(0x0b0d12);
@@ -69,6 +105,38 @@ async function main(): Promise<void> {
   const sceneObjs = addSceneObjects(scene);
   const knot = sceneObjs.knot;
 
+  // ---- 10 cm reference sphere ------------------------------------------
+  // With VOLUME_DISPLAY_SCALE = 0.02, 1 world unit = 50 mm. A 10 cm
+  // diameter sphere is therefore 2.0 world units across (radius 1.0).
+  // The head (volume's +Y end after VolGL's medical-pose orientation)
+  // sits roughly between world Y = 0.5 and Y = 1.0, and the volume's
+  // right edge is at X = 1.6 (160 mm × 0.02 / 2). Placing the sphere
+  // at (2.6, 0.5, 0) puts its leftmost surface tangent to the volume
+  // — the closest non-overlapping position for a 10 cm ball next to
+  // the head. If the rendered sphere looks ~half the size of the
+  // head, the volume's scale is correct; if it looks the same size
+  // as the head or bigger, the mm↔unit mapping is off.
+  const referenceSphere = new Mesh(
+    new SphereGeometry(1.0, 48, 32),
+    new MeshStandardMaterial({
+      color: 0xffd23f, // high-contrast yellow
+      roughness: 0.35,
+      metalness: 0.1,
+      emissive: 0x402200,
+      emissiveIntensity: 0.15,
+    }),
+  );
+  referenceSphere.name = 'ReferenceSphere10cm';
+  // With the DICOM origin now anchored at world (0, 0, 0), the volume
+  // occupies world X = -3.2..0, Y = 0..2.0, Z = 0..3.2. The head
+  // lives in the upper portion (Y ≈ 1.5). The sphere is placed
+  // tangent to the volume's +X face (the camera-facing side, where
+  // the patient is "left" in patient space) at head height — a 1.0
+  // unit (10 cm) gap between the volume's edge and the sphere's
+  // surface.
+  referenceSphere.position.set(1.0, 1.5, 1.6);
+  scene.add(referenceSphere);
+
   // ---- Volume renderer (wrapped in a scaled Group) ---------------------
   // The volume mesh is scaled to the physical extent in mm (e.g.
   // 160×160×100). We wrap it in volumeRoot and apply
@@ -80,6 +148,16 @@ async function main(): Promise<void> {
   const volumeRoot = new Group();
   volumeRoot.name = 'CBCTVolume';
   volumeRoot.scale.setScalar(VOLUME_DISPLAY_SCALE);
+  // Position the volume so the DICOM origin (ImagePositionPatient of
+  // the first slice) maps to world (0, 0, 0). The DICOM origin voxel
+  // sits at the box's (-0.5, -0.5, -0.5) corner in local space; after
+  // the LPS→medical-pose orientation and 0.02 scale it lands at
+  // (1.6, -1.0, -1.6) in volumeRoot-local units. Negating that puts
+  // the DICOM origin at world (0, 0, 0), so the patient occupies
+  // the same world-space bounding box the scanner produced and
+  // reference objects (e.g. a 10 cm sphere at world (1.0, 0.5, 1.0)
+  // or wherever) can be placed in CBCT-relative coordinates directly.
+  volumeRoot.position.set(-1.6, 1.0, 1.6);
   scene.add(volumeRoot);
 
   // devicePixelRatio: see notes in handleResize — FBO must be sized to
@@ -110,7 +188,19 @@ async function main(): Promise<void> {
     camera.near = Math.max(0.001, maxExtent * 0.001);
     camera.far = Math.max(20, maxExtent * 20);
     camera.updateProjectionMatrix();
-    controls.target.set(0, 0, 0);
+    // The DICOM origin is anchored at world (0, 0, 0). The volume's
+    // centre in world space is at half-extent along each world axis.
+    // With VolGL's LPS_TO_MEDICAL_POSE the orientation maps:
+    //   col (local +X) → world -X  →  centre.x = -scaledEx/2
+    //   row (local +Y) → world +Z  →  centre.z =  scaledEy/2
+    //   slice (local +Z) → world +Y →  centre.y =  scaledEz/2
+    // Aim the orbit controls at that centre so the camera frames the
+    // patient instead of staring at the bottom-back-left corner.
+    controls.target.set(
+      -scaledEx / 2,
+      scaledEz / 2,
+      scaledEy / 2,
+    );
     controls.update();
   }
 
@@ -281,14 +371,13 @@ async function main(): Promise<void> {
   handleResize();
 
   // ---- Render loop ----------------------------------------------------
-  const clock = (await import('three')).Clock;
-  const cl = new clock();
+  const clock = new Clock();
   let frameCount = 0;
   let fpsTimer = 0;
   ui.setFps('— FPS');
 
   function tick(): void {
-    const delta = cl.getDelta();
+    const delta = clock.getDelta();
     const safeDelta = delta > 0 && delta < 0.1 ? delta : 0.016;
     controls.update();
     knot.rotation.y += safeDelta * 0.1; // ~6°/s
