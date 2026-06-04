@@ -1,185 +1,355 @@
+// VolGL-based CBCT viewer with:
+//   - DICOM volume rendering (ray-march in mm texture space)
+//   - 3D model display (axes / grid / cube / knot / ground plane in unit space)
+//   - OBJ file loader for user-supplied meshes (dental implant, marker, etc.)
+//
+// The volume's mesh is scaled to its physical extent in mm and wrapped in
+// a Group (volumeRoot) that is itself scaled by VOLUME_DISPLAY_SCALE so the
+// rendered volume fits in the same unit space as the scene objects and any
+// loaded 3D models. cameraFitToVolume accounts for the scale so the camera
+// distance is correct in world units.
+
 import {
   AmbientLight,
-  Clock,
+  Color,
   DirectionalLight,
   Group,
   PerspectiveCamera,
   Scene,
-  WebGLRenderer
+  WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import {
   VolumeRenderer,
   loadDicomVolume,
-  type TransferFunction,
-  type VolumeData
+  type VolumeData,
 } from '@volgl/renderer';
 
 import { addSceneObjects } from './scene-objects';
 import { bindUi, type VolumeController } from './ui';
 
-// ---- Renderer / scene / camera -------------------------------------------
-const canvas = document.getElementById('scene') as HTMLCanvasElement;
-const renderer = new WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
-
-const scene = new Scene();
-
-const camera = new PerspectiveCamera(
-  45,
-  canvas.clientWidth / canvas.clientHeight,
-  0.1,
-  100
-);
-camera.position.set(2.2, 1.6, 2.4);
-camera.lookAt(0, 0, 0);
-
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.target.set(0, 0, 0);
-
-// ---- Lighting ------------------------------------------------------------
-scene.add(new AmbientLight(0xffffff, 0.55));
-const key = new DirectionalLight(0xffffff, 0.9);
-key.position.set(3, 4, 2);
-scene.add(key);
-const rim = new DirectionalLight(0xa0b8ff, 0.3);
-rim.position.set(-3, 2, -1);
-scene.add(rim);
-
-// ---- Helper meshes -------------------------------------------------------
-// Keep a handle on the knot so the tick loop can rotate it.
-const sceneObjects = addSceneObjects(scene);
-const knot = sceneObjects.knot;
-
-// ---- Volume renderer -----------------------------------------------------
-// The volume data is in millimetres (e.g. 160×160×100 mm), but the rest of
-// the scene (knot, cube, grid, ground) is sized in Three.js's natural
-// unit-scale (0.3–10 units). To make the volume sit alongside those
-// objects instead of dwarfing them, we wrap the renderer in a Group and
-// scale it down. The chosen factor maps a 160 mm volume to ~3 units,
-// comparable to the grid cell footprint.
+/** Scale factor that maps the volume's mm dimensions to a unit-scale space
+ *  shared with the scene objects and any loaded 3D models. */
 const VOLUME_DISPLAY_SCALE = 0.02;
 
-const vol = new VolumeRenderer({ stepSize: 0.01, earlyRayTermination: 0.99 });
-const volumeRoot = new Group();
-volumeRoot.name = 'CBCTVolume';
-volumeRoot.scale.setScalar(VOLUME_DISPLAY_SCALE);
-// DICOM stores voxel data in the LPS (Left-Posterior-Superior) basis:
-//   texture X  = column index  = patient Left  → Right
-//   texture Y  = row index     = patient Post   → Ant
-//   texture Z  = slice index   = patient Sup    → Inf   (head → feet)
-// Without a reorientation, our unit box maps these directly to Three.js's
-// XYZ, which leaves the patient lying on their side (head pointing -Z).
-// Rotate +90° about X so the head (texture Z=0, box -Z) ends up at
-// +Y, and the patient's anterior (texture Y=0, box -Y) faces the camera
-// at -Z — the standard "feet-up viewer" medical-imaging pose.
-volumeRoot.rotation.x = Math.PI / 2;
-volumeRoot.add(vol.root);
-scene.add(volumeRoot);
+async function main(): Promise<void> {
+  // ---- Renderer / scene / camera ---------------------------------------
+  const canvas = document.getElementById('scene') as HTMLCanvasElement;
+  const renderer = new WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
 
-// Adapter that the UI module talks to.
-let lastVolume: VolumeData | null = null;
+  const scene = new Scene();
+  scene.background = new Color(0x0b0d12);
 
-const controller: VolumeController = {
-  setStepSize: (s) => vol.setStepSize(s),
-  setEarlyRayTermination: (t) => vol.setEarlyRayTermination(t),
-  setTransferFunction: (tf: TransferFunction) => vol.setTransferFunction(tf),
-  setWindowLevel: (level, width) => vol.setWindowLevel(level, width),
-  setPreset: (name) => vol.setPreset(name),
-  async setVolume(files: File[]): Promise<VolumeData> {
-    const data: VolumeData = await loadDicomVolume(files);
-    await vol.setVolume(data);
-    return data;
-  }
-};
+  const camera = new PerspectiveCamera(
+    45,
+    canvas.clientWidth / canvas.clientHeight,
+    0.1,
+    1000,
+  );
+  camera.position.set(2.2, 1.6, 2.4);
+  camera.lookAt(0, 0, 0);
 
-// ---- Camera fit-to-volume ----------------------------------------------
-function cameraFitToVolume(volume: VolumeData): void {
-  const [w, h, d] = volume.dimensions;
-  const [sx, sy, sz] = volume.spacing;
-  const ex = sx * w;
-  const ey = sy * h;
-  const ez = sz * d;
-  // The volume's mesh is wrapped in a Group scaled by VOLUME_DISPLAY_SCALE,
-  // so the camera has to frame the *scaled* world-space size, not the raw
-  // physical extent. Multiplying maxExtent by the scale converts mm into
-  // the same unit space the rest of the scene uses.
-  const maxExtent = Math.max(ex, ey, ez) * VOLUME_DISPLAY_SCALE;
-  const fovRad = (camera.fov * Math.PI) / 180;
-  const dist = (maxExtent * 0.6) / Math.tan(fovRad * 0.5);
-  camera.position.set(dist, dist * 0.75, dist);
-  camera.near = Math.max(0.001, maxExtent * 0.001);
-  camera.far = Math.max(20, maxExtent * 20);
-  camera.updateProjectionMatrix();
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
   controls.target.set(0, 0, 0);
-  controls.update();
-}
 
-function formatVolumeInfo(volume: VolumeData): string {
-  const [w, h, d] = volume.dimensions;
-  const [sx, sy, sz] = volume.spacing;
-  const ex = sx * w, ey = sy * h, ez = sz * d;
-  return `${w}×${h}×${d} · ${ex.toFixed(0)}×${ey.toFixed(0)}×${ez.toFixed(0)} mm`;
-}
+  scene.add(new AmbientLight(0xffffff, 0.6));
+  const sun = new DirectionalLight(0xffffff, 0.7);
+  sun.position.set(3, 4, 2);
+  scene.add(sun);
+  const rim = new DirectionalLight(0xa0b8ff, 0.3);
+  rim.position.set(-3, 2, -1);
+  scene.add(rim);
 
-// ---- UI wiring -----------------------------------------------------------
-const ui = bindUi(controller, {
-  onAutoRotateChange: (enabled) => {
-    controls.autoRotate = enabled;
-    controls.autoRotateSpeed = 1.0;
-  },
-  onResetView: () => {
-    if (lastVolume) cameraFitToVolume(lastVolume);
-  },
-  onVolumeLoaded: (data) => {
-    lastVolume = data;
-    cameraFitToVolume(data);
-    ui.setVolumeInfo(formatVolumeInfo(data));
+  // ---- Scene objects (axes, grid, cube, knot, ground) -----------------
+  // Stored in unit space; the volumeRoot below is scaled to match.
+  const sceneObjs = addSceneObjects(scene);
+  const knot = sceneObjs.knot;
+
+  // ---- Volume renderer (wrapped in a scaled Group) ---------------------
+  // The volume mesh is scaled to the physical extent in mm (e.g.
+  // 160×160×100). We wrap it in volumeRoot and apply
+  // VOLUME_DISPLAY_SCALE so the volume fits in the same unit space as
+  // the scene objects. The DICOM orientation (head up, anterior
+  // toward camera) is now applied automatically by VolGL inside
+  // VolumeCore, so we no longer need a manual rotation here — the
+  // library handles axial / coronal / sagittal orientations uniformly.
+  const volumeRoot = new Group();
+  volumeRoot.name = 'CBCTVolume';
+  volumeRoot.scale.setScalar(VOLUME_DISPLAY_SCALE);
+  scene.add(volumeRoot);
+
+  // devicePixelRatio: see notes in handleResize — FBO must be sized to
+  // the drawing buffer, not the CSS size, or back-face sampling breaks.
+  const dpr = window.devicePixelRatio;
+
+  const vol = new VolumeRenderer();
+  vol.resize(canvas.clientWidth * dpr, canvas.clientHeight * dpr);
+  volumeRoot.add(vol.root);
+
+  // ---- Controller + UI binding ----------------------------------------
+  let lastVolume: VolumeData | null = null;
+
+  function cameraFitToVolume(volume: VolumeData): void {
+    const [w, h, d] = volume.dimensions;
+    const [sx, sy, sz] = volume.spacing;
+    // Raw mm extents...
+    const ex = sx * w, ey = sy * h, ez = sz * d;
+    // ...then scaled into the same unit space as the scene objects so
+    // the camera frames both the volume and any 3D models.
+    const scaledEx = ex * VOLUME_DISPLAY_SCALE;
+    const scaledEy = ey * VOLUME_DISPLAY_SCALE;
+    const scaledEz = ez * VOLUME_DISPLAY_SCALE;
+    const maxExtent = Math.max(scaledEx, scaledEy, scaledEz);
+    const fovRad = (camera.fov * Math.PI) / 180;
+    const dist = (maxExtent * 0.6) / Math.tan(fovRad * 0.5);
+    camera.position.set(dist, dist * 0.75, dist);
+    camera.near = Math.max(0.001, maxExtent * 0.001);
+    camera.far = Math.max(20, maxExtent * 20);
+    camera.updateProjectionMatrix();
+    controls.target.set(0, 0, 0);
+    controls.update();
   }
+
+  function formatVolumeInfo(volume: VolumeData): string {
+    const [w, h, d] = volume.dimensions;
+    const [sx, sy, sz] = volume.spacing;
+    const ex = sx * w, ey = sy * h, ez = sz * d;
+    return `${w}×${h}×${d} · ${ex.toFixed(0)}×${ey.toFixed(0)}×${ez.toFixed(0)} mm`;
+  }
+
+  const controller: VolumeController = {
+    setStepSize: (s) => vol.setStepSize(s),
+    setEarlyRayTermination: (t) => vol.setEarlyRayTermination(t),
+    setTransferFunction: (tf) => vol.setTransferFunction(tf),
+    setWindowLevel: (level, width) => vol.setWindowLevel(level, width),
+    setPreset: (name) => vol.setPreset(name),
+    async setVolume(files: File[]): Promise<VolumeData> {
+      const data = await loadDicomVolume(files);
+      await vol.setVolume(data);
+      lastVolume = data;
+      cameraFitToVolume(data);
+      ui.setVolumeInfo(formatVolumeInfo(data));
+      ui.setResetEnabled(true);
+      return data;
+    },
+  };
+
+  const ui = bindUi(controller, {
+    onAutoRotateChange: (enabled) => {
+      controls.autoRotate = enabled;
+      controls.autoRotateSpeed = 1.0;
+    },
+    onResetView: () => {
+      if (lastVolume) cameraFitToVolume(lastVolume);
+    },
+    onVolumeLoaded: (data) => {
+      lastVolume = data;
+      cameraFitToVolume(data);
+      ui.setVolumeInfo(formatVolumeInfo(data));
+    },
+  });
+
+  // ---- 3D model (OBJ) loader ------------------------------------------
+  // A separate hidden <input type="file"> lets the user drop/select an
+  // .obj mesh (dental implant, fiducial marker, segmentation export).
+  // Loaded models are added to sceneRoot so they sit alongside the scene
+  // objects in unit space, then centered on the volume's origin and
+  // scaled to a sensible size relative to a 100mm volume.
+  const sceneRoot = new Group();
+  sceneRoot.name = 'ImportedModels';
+  scene.add(sceneRoot);
+
+  const modelInput = document.createElement('input');
+  modelInput.type = 'file';
+  modelInput.accept = '.obj';
+  modelInput.style.display = 'none';
+  document.body.appendChild(modelInput);
+  modelInput.addEventListener('change', () => {
+    const file = modelInput.files?.[0];
+    modelInput.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const objLoader = new OBJLoader();
+        const obj = objLoader.parse(reader.result as string);
+        // OBJLoader doesn't auto-attach a material. Use the standard
+        // material so the directional + ambient lights pick it up.
+        obj.traverse((child) => {
+          // Three.js OBJLoader's child types are Mesh; we cast defensively.
+          const mesh = child as unknown as {
+            isMesh?: boolean;
+            material?: unknown;
+          };
+          if (mesh.isMesh) {
+            // Dynamic import so the standard material only loads when a
+            // model is actually requested.
+            import('three').then(({ MeshStandardMaterial, Color }) => {
+              mesh.material = new MeshStandardMaterial({
+                color: new Color(0x6ad4ff),
+                metalness: 0.3,
+                roughness: 0.4,
+              });
+            });
+          }
+        });
+        // Normalise: center the bounding box on origin and scale so the
+        // longest axis is ~0.4 units (well within the 3.2-unit volume box).
+        // OBJLoader produces Group of Meshes; traverse to compute bbox.
+        const bbox = { min: { x: 0, y: 0, z: 0 }, max: { x: 0, y: 0, z: 0 } };
+        let first = true;
+        obj.traverse((c) => {
+          const mesh = c as unknown as {
+            geometry?: {
+              computeBoundingBox?: () => void;
+              boundingBox?: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } };
+            };
+          };
+          if (mesh.geometry?.computeBoundingBox) {
+            mesh.geometry.computeBoundingBox();
+            const bb = mesh.geometry.boundingBox!;
+            if (first) {
+              bbox.min.x = bb.min.x; bbox.min.y = bb.min.y; bbox.min.z = bb.min.z;
+              bbox.max.x = bb.max.x; bbox.max.y = bb.max.y; bbox.max.z = bb.max.z;
+              first = false;
+            } else {
+              bbox.min.x = Math.min(bbox.min.x, bb.min.x);
+              bbox.min.y = Math.min(bbox.min.y, bb.min.y);
+              bbox.min.z = Math.min(bbox.min.z, bb.min.z);
+              bbox.max.x = Math.max(bbox.max.x, bb.max.x);
+              bbox.max.y = Math.max(bbox.max.y, bb.max.y);
+              bbox.max.z = Math.max(bbox.max.z, bb.max.z);
+            }
+          }
+        });
+        const cx = (bbox.min.x + bbox.max.x) / 2;
+        const cy = (bbox.min.y + bbox.max.y) / 2;
+        const cz = (bbox.min.z + bbox.max.z) / 2;
+        const longest = Math.max(
+          bbox.max.x - bbox.min.x,
+          bbox.max.y - bbox.min.y,
+          bbox.max.z - bbox.min.z,
+        );
+        const targetSize = 0.4;
+        const scaleFactor = longest > 0 ? targetSize / longest : 1;
+        obj.position.set(-cx * scaleFactor, -cy * scaleFactor, -cz * scaleFactor);
+        obj.scale.setScalar(scaleFactor);
+        sceneRoot.add(obj);
+        ui.setStatus(`Imported ${file.name} (${(file.size / 1024).toFixed(1)} KB).`);
+      } catch (err) {
+        ui.setStatus(`OBJ parse failed: ${(err as Error).message}`, 'error');
+      }
+    };
+    reader.onerror = () => ui.setStatus(`Read failed: ${reader.error?.message ?? 'unknown'}`, 'error');
+    reader.readAsText(file);
+  });
+
+  // Wire the OBJ loader to a button we'll add to the side panel.
+  const importBtn = document.getElementById('importObj') as HTMLButtonElement | null;
+  if (importBtn) {
+    importBtn.addEventListener('click', () => modelInput.click());
+  }
+  // Also accept .obj files dropped onto the window.
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => {
+    const f = e.dataTransfer?.files?.[0];
+    if (f && f.name.toLowerCase().endsWith('.obj')) {
+      e.preventDefault();
+      const dt = new DataTransfer();
+      dt.items.add(f);
+      modelInput.files = dt.files;
+      modelInput.dispatchEvent(new Event('change'));
+    }
+  });
+
+  ui.setStatus('Ready. Drop DICOM files to load a volume, or use "Import OBJ" for a 3D model.');
+
+  // ---- Resize ----------------------------------------------------------
+  function handleResize(): void {
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    vol.resize(w * dpr, h * dpr);
+  }
+  window.addEventListener('resize', handleResize);
+  handleResize();
+
+  // ---- Render loop ----------------------------------------------------
+  const clock = (await import('three')).Clock;
+  const cl = new clock();
+  let frameCount = 0;
+  let fpsTimer = 0;
+  ui.setFps('— FPS');
+
+  function tick(): void {
+    const delta = cl.getDelta();
+    const safeDelta = delta > 0 && delta < 0.1 ? delta : 0.016;
+    controls.update();
+    knot.rotation.y += safeDelta * 0.1; // ~6°/s
+    renderer.render(scene, camera);
+
+    frameCount += 1;
+    fpsTimer += delta;
+    if (fpsTimer >= 1.0) {
+      ui.setFps(`${frameCount} FPS`);
+      frameCount = 0;
+      fpsTimer = 0;
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+
+  // ---- Debug hooks ---------------------------------------------------
+  (window as unknown as { __demoReady: boolean }).__demoReady = true;
+  (window as unknown as Record<string, unknown>).__debug = {
+    renderer,
+    scene,
+    camera,
+    controls,
+    vol,
+    volumeRoot,
+    controller,
+    sceneRoot,
+    fitToVolume: () => {
+      if (lastVolume) cameraFitToVolume(lastVolume);
+    },
+    getInfo: () => ({
+      cameraPos: camera.position.toArray(),
+      cameraNear: camera.near,
+      cameraFar: camera.far,
+      cameraTarget: controls.target.toArray(),
+      volumeRootScale: volumeRoot.scale.toArray(),
+      volumeRootRot: [volumeRoot.rotation.x, volumeRoot.rotation.y, volumeRoot.rotation.z],
+      importedModelCount: sceneRoot.children.length,
+      volumeLoaded: lastVolume
+        ? { dimensions: lastVolume.dimensions, spacing: lastVolume.spacing }
+        : null,
+    }),
+  };
+
+  // Keyboard cheat-sheet for the shader diagnostic modes.
+  //   0 normal composited output
+  //   1 raw density (first sample, full HU range)
+  //   2 back-face position (xyz -> rgb)
+  //   3 step count (blue=stopped immediately, red=travelled the full box)
+  //   4 transfer-function alpha sum along the ray
+  //   5 normalized windowed density (post WL/WW, pre-LUT)
+  window.addEventListener('keydown', (e) => {
+    if (e.key >= '0' && e.key <= '5') {
+      vol.setDebugMode(Number(e.key));
+      ui.setStatus(`Debug mode: ${e.key}`);
+    }
+  });
+}
+
+main().catch((err) => {
+  console.error(err);
+  const status = document.getElementById('status');
+  if (status) status.textContent = `Fatal: ${(err as Error).message}`;
 });
-
-ui.setStatus('Scene ready. Drop DICOM files to load a volume.');
-
-// ---- Resize --------------------------------------------------------------
-function handleResize(): void {
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  vol.resize(w, h);
-}
-window.addEventListener('resize', handleResize);
-handleResize();
-
-// ---- Render loop ---------------------------------------------------------
-// ---- FPS counter --------------------------------------------------------
-const clock = new Clock();
-let frameCount = 0;
-let fpsTimer = 0;
-ui.setFps('— FPS');
-
-function tick(): void {
-  const delta = clock.getDelta();
-  // Clamp first-frame or tab-switch deltas so the knot doesn't jump.
-  const safeDelta = delta > 0 && delta < 0.1 ? delta : 0.016;
-  controls.update();
-  knot.rotation.y += safeDelta * 0.1; // ~6°/s independent of camera auto-rotate
-  renderer.render(scene, camera);
-
-  // FPS sampling: count frames in a 1s window.
-  frameCount += 1;
-  fpsTimer += delta;
-  if (fpsTimer >= 1.0) {
-    ui.setFps(`${frameCount} FPS`);
-    frameCount = 0;
-    fpsTimer = 0;
-  }
-  requestAnimationFrame(tick);
-}
-tick();
-
-// Expose a tiny diagnostic handle for headless smoke tests.
-(window as unknown as { __demoReady: boolean }).__demoReady = true;
