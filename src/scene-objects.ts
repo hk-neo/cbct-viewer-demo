@@ -5,7 +5,7 @@ import {
   GridHelper,
   Mesh,
   MeshStandardMaterial,
-  TorusKnotGeometry,
+  SphereGeometry,
   type Object3D
 } from 'three';
 
@@ -19,7 +19,7 @@ export function addSceneObjects(scene: { add: (obj: Object3D) => void }): {
   axes: AxesHelper;
   grid: GridHelper;
   cube: Mesh;
-  knot: Mesh;
+  referenceSphere: Mesh;
   ground: Mesh;
 } {
   // AxesHelper — RGBXYZ orientation (X red, Y green, Z blue), 1.0 unit long.
@@ -42,30 +42,30 @@ export function addSceneObjects(scene: { add: (obj: Object3D) => void }): {
   cube.position.set(0.7, 0.2, 0.0);
   scene.add(cube);
 
-  // Decorative blue torus knot — purely visual. Sits inside the
-  // volume's world box (the user's original placement) so it reads
-  // as a "tube through the patient" rather than a separate scene
-  // element next to the box. The "real" fix for the user-reported
-  // issue — knot disappearing at some angles — is to render it with
-  // depthTest: false and a high renderOrder: then it always paints
-  // on top of the volume regardless of whether the volume's
-  // ray-march ray happens to traverse a tissue voxel at the knot's
-  // screen pixel. Without this, the ray's alpha accumulation
-  // (which integrates ALL the voxels the ray crosses, not just the
-  // one under the knot) intermittently occludes the knot.
-  const knot = new Mesh(
-    new TorusKnotGeometry(0.3, 0.08, 100, 16),
+  // 10 cm reference sphere. Placed at world (-0.7, 0.2, 0) — the same
+  // XZ the blue knot used to live at, so the sphere is now the only
+  // object occupying the "decorative scene element next to the volume"
+  // slot. Painted with depthTest: false + renderOrder 999 so it's
+  // always visible regardless of what the volume's ray-march ray is
+  // doing (its colour is the scale reference for the volume).
+  // With VOLUME_DISPLAY_SCALE = 0.02, 1 world unit = 50 mm so a 10 cm
+  // diameter sphere is 2.0 world units across (radius 1.0).
+  const referenceSphere = new Mesh(
+    new SphereGeometry(1.0, 48, 32),
     new MeshStandardMaterial({
-      color: 0x58a6ff,
-      roughness: 0.3,
-      metalness: 0.2,
+      color: 0xffd23f, // high-contrast yellow
+      roughness: 0.35,
+      metalness: 0.1,
+      emissive: 0x402200,
+      emissiveIntensity: 0.15,
       depthTest: false,
       depthWrite: false,
     }),
   );
-  knot.position.set(-0.7, 0.2, 0.0);
-  knot.renderOrder = 999;
-  scene.add(knot);
+  referenceSphere.name = 'ReferenceSphere10cm';
+  referenceSphere.position.set(-0.7, 0.2, 0.0);
+  referenceSphere.renderOrder = 999;
+  scene.add(referenceSphere);
 
   // Subtle ground plane — gives the scene a floor.
   const ground = new Mesh(
@@ -80,5 +80,5 @@ export function addSceneObjects(scene: { add: (obj: Object3D) => void }): {
   ground.position.y = 0;
   scene.add(ground);
 
-  return { axes, grid, cube, knot, ground };
+  return { axes, grid, cube, referenceSphere, ground };
 }

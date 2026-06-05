@@ -1,6 +1,6 @@
 // VolGL-based CBCT viewer with:
 //   - DICOM volume rendering (ray-march in mm texture space)
-//   - 3D model display (axes / grid / cube / knot / ground plane in unit space)
+//   - 3D model display (axes / grid / cube / 10cm reference sphere / ground plane in unit space)
 //   - OBJ file loader for user-supplied meshes (dental implant, marker, etc.)
 //
 // The volume's mesh is scaled to its physical extent in mm and wrapped in
@@ -15,11 +15,8 @@ import {
   Color,
   DirectionalLight,
   Group,
-  Mesh,
-  MeshStandardMaterial,
   PerspectiveCamera,
   Scene,
-  SphereGeometry,
   WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -100,42 +97,13 @@ async function main(): Promise<void> {
   rim.position.set(-3, 2, -1);
   scene.add(rim);
 
-  // ---- Scene objects (axes, grid, cube, knot, ground) -----------------
+  // ---- Scene objects (axes, grid, cube, 10cm reference sphere, ground) ----
   // Stored in unit space; the volumeRoot below is scaled to match.
-  const sceneObjs = addSceneObjects(scene);
-  const knot = sceneObjs.knot;
-
-  // ---- 10 cm reference sphere ------------------------------------------
-  // With VOLUME_DISPLAY_SCALE = 0.02, 1 world unit = 50 mm. A 10 cm
-  // diameter sphere is therefore 2.0 world units across (radius 1.0).
-  // The head (volume's +Y end after VolGL's medical-pose orientation)
-  // sits roughly between world Y = 0.5 and Y = 1.0, and the volume's
-  // right edge is at X = 1.6 (160 mm × 0.02 / 2). Placing the sphere
-  // at (2.6, 0.5, 0) puts its leftmost surface tangent to the volume
-  // — the closest non-overlapping position for a 10 cm ball next to
-  // the head. If the rendered sphere looks ~half the size of the
-  // head, the volume's scale is correct; if it looks the same size
-  // as the head or bigger, the mm↔unit mapping is off.
-  const referenceSphere = new Mesh(
-    new SphereGeometry(1.0, 48, 32),
-    new MeshStandardMaterial({
-      color: 0xffd23f, // high-contrast yellow
-      roughness: 0.35,
-      metalness: 0.1,
-      emissive: 0x402200,
-      emissiveIntensity: 0.15,
-    }),
-  );
-  referenceSphere.name = 'ReferenceSphere10cm';
-  // With the DICOM origin now anchored at world (0, 0, 0), the volume
-  // occupies world X = -3.2..0, Y = 0..2.0, Z = 0..3.2. The head
-  // lives in the upper portion (Y ≈ 1.5). The sphere is placed
-  // tangent to the volume's +X face (the camera-facing side, where
-  // the patient is "left" in patient space) at head height — a 1.0
-  // unit (10 cm) gap between the volume's edge and the sphere's
-  // surface.
-  referenceSphere.position.set(1.0, 1.5, 1.6);
-  scene.add(referenceSphere);
+  // The 10cm reference sphere now lives in scene-objects.ts at the
+  // same XZ as the old knot (-0.7, 0.2, 0) so it sits at the
+  // bottom-front of the volume. depthTest: false + renderOrder 999
+  // keep it always on top regardless of the volume's data.
+  addSceneObjects(scene);
 
   // ---- Volume renderer (wrapped in a scaled Group) ---------------------
   // The volume mesh is scaled to the physical extent in mm (e.g.
@@ -378,9 +346,7 @@ async function main(): Promise<void> {
 
   function tick(): void {
     const delta = clock.getDelta();
-    const safeDelta = delta > 0 && delta < 0.1 ? delta : 0.016;
     controls.update();
-    knot.rotation.y += safeDelta * 0.1; // ~6°/s
     renderer.render(scene, camera);
 
     frameCount += 1;
