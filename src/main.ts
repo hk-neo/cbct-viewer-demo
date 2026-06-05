@@ -235,23 +235,38 @@ async function main(): Promise<void> {
       try {
         const objLoader = new OBJLoader();
         const obj = objLoader.parse(reader.result as string);
-        // OBJLoader doesn't auto-attach a material. Use the standard
-        // material so the directional + ambient lights pick it up.
+        // First, set the renderOrder on every mesh so the model
+        // renders AFTER the volume. Then the dynamic-import
+        // traversal below attaches the actual material with
+        // depthTest: false so it survives the volume's ray-march
+        // occlusion. This is the standard clinical-viewer behaviour:
+        // a surgeon needs to see the implant / scan even when the
+        // patient is "in front" of it from the camera's POV.
         obj.traverse((child) => {
-          // Three.js OBJLoader's child types are Mesh; we cast defensively.
           const mesh = child as unknown as {
             isMesh?: boolean;
-            material?: unknown;
+            renderOrder?: number;
+          };
+          if (mesh.isMesh) mesh.renderOrder = 999;
+        });
+        // Now attach the actual metal-ceramic material.
+        obj.traverse((child) => {
+          const mesh = child as unknown as {
+            isMesh?: boolean;
+            material?: { depthTest?: boolean; depthWrite?: boolean; needsUpdate?: boolean };
           };
           if (mesh.isMesh) {
-            // Dynamic import so the standard material only loads when a
-            // model is actually requested.
             import('three').then(({ MeshStandardMaterial, Color }) => {
               mesh.material = new MeshStandardMaterial({
-                color: new Color(0x6ad4ff),
-                metalness: 0.3,
-                roughness: 0.4,
+                color: new Color(0x9bc3d4),
+                metalness: 0.55,
+                roughness: 0.35,
               });
+              // Always-on-top so the implant / IOS scan stays
+              // visible when it overlaps the volume.
+              mesh.material.depthTest = false;
+              mesh.material.depthWrite = false;
+              mesh.material.needsUpdate = true;
             });
           }
         });

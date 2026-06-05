@@ -63,8 +63,7 @@ export function addSceneObjects(scene: { add: (obj: Object3D) => void }): {
     }),
   );
   referenceSphere.name = 'ReferenceSphere10cm';
-  referenceSphere.position.set(-0.7, 0.2, 0.0);
-  referenceSphere.renderOrder = 999;
+  referenceSphere.position.set(1.0, 1.5, 1.6);
   scene.add(referenceSphere);
 
   // Subtle ground plane — gives the scene a floor.
